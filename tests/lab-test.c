@@ -1,6 +1,9 @@
 #include <stdio.h>
+#include <unistd.h>
 #include "harness/unity.h"
 #include "../src/lab.h"
+
+bool lab_test_capacity_overflow(void);
 
 
 void setUp(void) {
@@ -14,12 +17,17 @@ void tearDown(void) {
 void test_ip_parse_and_format(void) {
   const char *invalid[] = {
     "1.2.3", "1.2.3.4.5", "1..2.3", "256.1.1.1", "010.0.0.1",
-    "1.2.3.4x", "+1.2.3.4", "1.2.3.-4", "1.2.3.4 ", ""
+    "1.2.3.4x", "+1.2.3.4", "1.2.3.-4", "1.2.3.4 ", "",
+    "1234.1.1.1"
   };
   uint32_t addr = 0xDEADBEEFU;
 
   TEST_ASSERT_TRUE(ip_parse("192.168.1.10", &addr));
   TEST_ASSERT_EQUAL_HEX32(0xC0A8010AU, addr);
+  TEST_ASSERT_TRUE(ip_parse("0.0.0.0", &addr));
+  TEST_ASSERT_EQUAL_HEX32(0U, addr);
+  TEST_ASSERT_TRUE(ip_parse("255.255.255.255", &addr));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_MAX, addr);
   for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
     addr = 0xDEADBEEFU;
     TEST_ASSERT_FALSE(ip_parse(invalid[i], &addr));
@@ -33,13 +41,14 @@ void test_ip_parse_and_format(void) {
   TEST_ASSERT_EQUAL_STRING("192.168.1.10", formatted);
   ip_format(0xFFFFFFFFU, formatted);
   TEST_ASSERT_EQUAL_STRING("255.255.255.255", formatted);
+  ip_format(0U, NULL);
 }
 
 void test_cidr_parse_and_format(void) {
   const char *invalid[] = {
     "1.2.3.4/33", "1.2.3.4/024", "1.2.3.4/", "1.2.3/24",
     "1.2.3.4/-1", "1.2.3.4/1x", "1.2.3.4/00", "1.2.3.4/000",
-    "1.2.3.4/256", "1.2.3.4/24/1"
+    "1.2.3.4/256", "1.2.3.4/24/1", "1.2.3.4"
   };
   cidr_t block = { .addr = 0xDEADBEEFU, .prefix = 17 };
 
@@ -54,7 +63,11 @@ void test_cidr_parse_and_format(void) {
     TEST_ASSERT_EQUAL_UINT32(17U, block.prefix);
   }
   TEST_ASSERT_TRUE(cidr_parse("0.0.0.0/0", &block));
+  TEST_ASSERT_EQUAL_HEX32(0U, block.addr);
   TEST_ASSERT_EQUAL_UINT32(0U, block.prefix);
+  TEST_ASSERT_TRUE(cidr_parse("255.255.255.255/32", &block));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_MAX, block.addr);
+  TEST_ASSERT_EQUAL_UINT32(32U, block.prefix);
   TEST_ASSERT_FALSE(cidr_parse(NULL, &block));
   TEST_ASSERT_FALSE(cidr_parse("1.2.3.4/24", NULL));
 
@@ -63,6 +76,7 @@ void test_cidr_parse_and_format(void) {
   TEST_ASSERT_EQUAL_STRING("255.255.255.255/32", formatted);
   cidr_format((cidr_t){ .addr = 0x01020304U, .prefix = 255 }, formatted);
   TEST_ASSERT_EQUAL_STRING("1.2.3.4/32", formatted);
+  cidr_format((cidr_t){ .addr = 0U, .prefix = 0U }, NULL);
 }
 
 void test_cidr_subnet_arithmetic(void) {
@@ -86,6 +100,7 @@ void test_cidr_subnet_arithmetic(void) {
 
   block.addr = 0x01020304U;
   block.prefix = 0;
+  TEST_ASSERT_EQUAL_HEX32(0U, cidr_network(block));
   TEST_ASSERT_EQUAL_UINT64(4294967294ULL, cidr_host_count(block));
   TEST_ASSERT_EQUAL_HEX32(1U, cidr_first_host(block));
   TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFU, cidr_broadcast(block));
@@ -94,13 +109,24 @@ void test_cidr_subnet_arithmetic(void) {
   TEST_ASSERT_FALSE(cidr_is_network(block));
 
   block = (cidr_t){ .addr = 0xC0000200U, .prefix = 31 };
+  TEST_ASSERT_EQUAL_HEX32(0xC0000200U, cidr_network(block));
+  TEST_ASSERT_EQUAL_HEX32(0xC0000201U, cidr_broadcast(block));
   TEST_ASSERT_EQUAL_HEX32(0xC0000200U, cidr_first_host(block));
   TEST_ASSERT_EQUAL_HEX32(0xC0000201U, cidr_last_host(block));
   TEST_ASSERT_EQUAL_UINT64(2U, cidr_host_count(block));
+  TEST_ASSERT_TRUE(cidr_contains(block, 0xC0000200U));
+  TEST_ASSERT_TRUE(cidr_contains(block, 0xC0000201U));
+  TEST_ASSERT_FALSE(cidr_contains(block, 0xC0000202U));
+  TEST_ASSERT_TRUE(cidr_is_network(block));
   block.prefix = 32;
+  TEST_ASSERT_EQUAL_HEX32(0xC0000200U, cidr_network(block));
+  TEST_ASSERT_EQUAL_HEX32(0xC0000200U, cidr_broadcast(block));
   TEST_ASSERT_EQUAL_HEX32(0xC0000200U, cidr_first_host(block));
   TEST_ASSERT_EQUAL_HEX32(0xC0000200U, cidr_last_host(block));
   TEST_ASSERT_EQUAL_UINT64(1U, cidr_host_count(block));
+  TEST_ASSERT_TRUE(cidr_contains(block, 0xC0000200U));
+  TEST_ASSERT_FALSE(cidr_contains(block, 0xC0000201U));
+  TEST_ASSERT_TRUE(cidr_is_network(block));
 
   cidr_t subnet = { .addr = 0xDEADBEEFU, .prefix = 17 };
   block = (cidr_t){ .addr = 0xC0A80000U, .prefix = 24 };
@@ -112,11 +138,15 @@ void test_cidr_subnet_arithmetic(void) {
   TEST_ASSERT_EQUAL_UINT32(26U, subnet.prefix);
 
   block = (cidr_t){ .addr = 0, .prefix = 0 };
+  TEST_ASSERT_TRUE(cidr_subnet(block, 1, 0, &subnet));
+  TEST_ASSERT_EQUAL_HEX32(0U, subnet.addr);
+  TEST_ASSERT_EQUAL_UINT32(0U, subnet.prefix);
   TEST_ASSERT_TRUE(cidr_subnet(block, 0x80000000U, 0x7FFFFFFFU, &subnet));
   TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFEU, subnet.addr);
   TEST_ASSERT_EQUAL_UINT32(31U, subnet.prefix);
 
   subnet = (cidr_t){ .addr = 0xDEADBEEFU, .prefix = 17 };
+  TEST_ASSERT_FALSE(cidr_subnet(block, 0, 0, &subnet));
   TEST_ASSERT_FALSE(cidr_subnet(block, 3, 0, &subnet));
   TEST_ASSERT_EQUAL_HEX32(0xDEADBEEFU, subnet.addr);
   TEST_ASSERT_EQUAL_UINT32(17U, subnet.prefix);
@@ -147,7 +177,10 @@ void test_route_parse_and_table(void) {
   const char *invalid[] = {
     "", "default direct", "default direct eth0 extra",
     "10.1.2.1/24 direct eth0", "10.0.0.0/8 256.1.1.1 eth0",
-    "10.0.0.0/8 direct", "10.0.0.0/8 direct eth0123456789012"
+    "10.0.0.0/8 direct", "10.0.0.0/8 direct eth0123456789012",
+    "1234567890123456789 direct eth0",
+    "10.0.0.0/8 1234567890123456 eth0",
+    "default direct eth0\vbad"
   };
   for (size_t index = 0; index < sizeof(invalid) / sizeof(invalid[0]); index++) {
     route.dest.addr = 0xDEADBEEFU;
@@ -249,7 +282,90 @@ void test_route_parse_and_table(void) {
   bad_line = 99;
   TEST_ASSERT_FALSE(table_load(NULL, NULL, &bad_line));
   TEST_ASSERT_EQUAL_UINT32(0U, bad_line);
+  TEST_ASSERT_FALSE(table_load(table, NULL, NULL));
+
+  input = tmpfile();
+  TEST_ASSERT_NOT_NULL(input);
+  int input_fd = fileno(input);
+  TEST_ASSERT_TRUE(input_fd >= 0);
+  TEST_ASSERT_EQUAL_INT(0, close(input_fd));
+  bad_line = 99;
+  TEST_ASSERT_FALSE(table_load(table, input, &bad_line));
+  TEST_ASSERT_EQUAL_UINT32(0U, bad_line);
+  (void)fclose(input);
   table_destroy(table);
+}
+
+void test_lookup_order_and_missing_default(void) {
+  const char *specific_first[] = {
+    "10.1.2.128/25 10.1.2.1 eth25",
+    "10.1.2.0/24 direct eth24",
+    "10.1.0.0/16 10.1.0.1 eth16",
+    "10.0.0.0/8 10.0.0.1 eth8"
+  };
+  const char *broad_first[] = {
+    "10.0.0.0/8 10.0.0.1 eth8",
+    "10.1.0.0/16 10.1.0.1 eth16",
+    "10.1.2.0/24 direct eth24",
+    "10.1.2.128/25 10.1.2.1 eth25"
+  };
+  fwd_table_t *first = table_create();
+  fwd_table_t *second = table_create();
+  TEST_ASSERT_NOT_NULL(first);
+  TEST_ASSERT_NOT_NULL(second);
+
+  route_t route;
+  for (size_t index = 0; index < sizeof(specific_first) / sizeof(specific_first[0]); index++) {
+    TEST_ASSERT_TRUE(route_parse(specific_first[index], &route));
+    TEST_ASSERT_TRUE(table_add(first, &route));
+    TEST_ASSERT_TRUE(route_parse(broad_first[index], &route));
+    TEST_ASSERT_TRUE(table_add(second, &route));
+  }
+  TEST_ASSERT_EQUAL_UINT32(4U, table_count(first));
+  TEST_ASSERT_EQUAL_UINT32(4U, table_count(second));
+
+  const uint32_t destinations[] = { 0x0A010281U, 0x0A010240U, 0x0A010340U };
+  const char *expected_devices[] = { "eth25", "eth24", "eth16" };
+  for (size_t index = 0; index < sizeof(destinations) / sizeof(destinations[0]); index++) {
+    const route_t *first_match = table_lookup(first, destinations[index]);
+    const route_t *second_match = table_lookup(second, destinations[index]);
+    TEST_ASSERT_NOT_NULL(first_match);
+    TEST_ASSERT_NOT_NULL(second_match);
+    TEST_ASSERT_EQUAL_STRING(expected_devices[index], first_match->dev);
+    TEST_ASSERT_EQUAL_STRING(expected_devices[index], second_match->dev);
+  }
+  TEST_ASSERT_NULL(table_lookup(first, 0xC0000201U));
+  TEST_ASSERT_NULL(table_lookup(second, 0xC0000201U));
+
+  table_destroy(first);
+  table_destroy(second);
+}
+
+void test_table_growth_and_prefix_boundaries(void) {
+  fwd_table_t *table = table_create();
+  TEST_ASSERT_NOT_NULL(table);
+
+  for (uint32_t index = 0; index < 12U; index++) {
+    route_t route = {
+      .dest = { .addr = 0xC0000200U + index, .prefix = 32 },
+      .gateway = index,
+      .dev = "eth-test"
+    };
+    TEST_ASSERT_TRUE(table_add(table, &route));
+  }
+  TEST_ASSERT_EQUAL_UINT32(12U, table_count(table));
+  for (uint32_t index = 0; index < 12U; index++) {
+    const route_t *route = table_lookup(table, 0xC0000200U + index);
+    TEST_ASSERT_NOT_NULL(route);
+    TEST_ASSERT_EQUAL_HEX32(0xC0000200U + index, route->dest.addr);
+    TEST_ASSERT_EQUAL_UINT32(32U, route->dest.prefix);
+  }
+
+  table_destroy(table);
+}
+
+void test_table_capacity_overflow_guard(void) {
+  TEST_ASSERT_TRUE(lab_test_capacity_overflow());
 }
 
 int main(void) {
@@ -258,5 +374,8 @@ int main(void) {
   RUN_TEST(test_cidr_parse_and_format);
   RUN_TEST(test_cidr_subnet_arithmetic);
   RUN_TEST(test_route_parse_and_table);
+  RUN_TEST(test_lookup_order_and_missing_default);
+  RUN_TEST(test_table_growth_and_prefix_boundaries);
+  RUN_TEST(test_table_capacity_overflow_guard);
   return UNITY_END();
 }

@@ -373,6 +373,65 @@ struct fwd_table
   size_t capacity;
 };
 
+static bool table_next_capacity(size_t capacity, size_t *new_capacity)
+{
+  size_t next = capacity == 0 ? 8 : capacity * 2;
+  if (next < capacity || next > SIZE_MAX / sizeof(route_t))
+  {
+    return false;
+  }
+  *new_capacity = next;
+  return true;
+}
+
+static bool table_grow(fwd_table_t *table)
+{
+  size_t new_capacity;
+  if (!table_next_capacity(table->capacity, &new_capacity))
+  {
+    return false;
+  }
+
+  route_t *routes = realloc(table->routes, new_capacity * sizeof(*routes));
+  if (routes == NULL)
+  {
+    // GCOVR_EXCL_START
+    return false;
+    // GCOVR_EXCL_STOP
+  }
+
+  table->routes = routes;
+  table->capacity = new_capacity;
+  return true;
+}
+
+static bool table_append(fwd_table_t *table, const route_t *route)
+{
+  if (table->count == table->capacity && !table_grow(table))
+  {
+    return false;
+  }
+  table->routes[table->count] = *route;
+  table->count++;
+  return true;
+}
+
+#ifdef TEST
+bool lab_test_capacity_overflow(void)
+{
+  size_t max_routes = SIZE_MAX / sizeof(route_t);
+  route_t route = { .dest = { .addr = 0, .prefix = 0 } };
+  fwd_table_t table = {
+    .count = SIZE_MAX / 2 + 1,
+    .capacity = SIZE_MAX / 2 + 1
+  };
+  bool overflow_rejected = !table_append(&table, &route);
+  table.count = max_routes / 2 + 1;
+  table.capacity = max_routes / 2 + 1;
+  return overflow_rejected && !table_append(&table, &route);
+}
+#endif
+
 fwd_table_t *table_create(void)
 {
   return calloc(1, sizeof(fwd_table_t));
@@ -409,27 +468,7 @@ bool table_add(fwd_table_t *table, const route_t *route)
     }
   }
 
-  if (table->count == table->capacity)
-  {
-    size_t new_capacity = table->capacity == 0 ? 8 : table->capacity * 2;
-    if (new_capacity < table->capacity ||
-        new_capacity > SIZE_MAX / sizeof(*table->routes))
-    {
-      return false;
-    }
-
-    route_t *routes = realloc(table->routes, new_capacity * sizeof(*routes));
-    if (routes == NULL)
-    {
-      return false;
-    }
-    table->routes = routes;
-    table->capacity = new_capacity;
-  }
-
-  table->routes[table->count] = *route;
-  table->count++;
-  return true;
+  return table_append(table, route);
 }
 
 bool table_load(fwd_table_t *table, FILE *in, size_t *bad_line)
@@ -451,11 +490,6 @@ bool table_load(fwd_table_t *table, FILE *in, size_t *bad_line)
 
   while ((length = getline(&line, &capacity, in)) >= 0)
   {
-    if (line_number == SIZE_MAX)
-    {
-      success = false;
-      break;
-    }
     line_number++;
 
     char *comment = strchr(line, '#');
@@ -512,35 +546,4 @@ const route_t *table_lookup(const fwd_table_t *table, uint32_t dest)
     }
   }
   return best;
-}
-
-char *get_greeting(const char *restrict name)
-{
-  if (name == NULL)
-  {
-    return NULL;
-  }
-
-  // Allocate memory for the greeting message
-  int length = snprintf(NULL, 0, "Hello, %s!", name);
-  if (length < 0) // GCOVR_EXCL_START
-  {
-    return NULL; // snprintf failed
-  } // GCOVR_EXCL_STOP
-
-  //Casting is safe here because we know length is non-negative
-  size_t alloc_size = (size_t) length + 1; // +1 for the null terminator
-  char *greeting = malloc( alloc_size);
-
-
-  if (greeting == NULL) // GCOVR_EXCL_START
-  {
-    return NULL; // Memory allocation failed
-  }  // GCOVR_EXCL_STOP
-
-
-  // Create the greeting message
-  snprintf(greeting, alloc_size, "Hello, %s!", name);
-
-  return greeting;
 }
